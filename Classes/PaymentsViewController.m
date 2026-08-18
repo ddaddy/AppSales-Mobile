@@ -91,18 +91,12 @@
 
 	NSCalendar *calendar = [[NSCalendar alloc] initWithCalendarIdentifier:NSCalendarIdentifierGregorian];
 
-	NSString *paymentCurrencyCode = nil;
-
 	paymentsByYear = [NSMutableDictionary dictionary];
 	NSMutableDictionary *sumsByYear = [NSMutableDictionary dictionary];
 	NSSet *allPaymentReports = account.paymentReports;
 	for (NSManagedObject *paymentReport in allPaymentReports) {
 		NSSet *paymentReportPayments = [paymentReport valueForKey:@"payments"];
 		for (NSManagedObject *payment in paymentReportPayments) {
-			if (!paymentCurrencyCode) {
-				// We assume that all payments have the same currency.
-				paymentCurrencyCode = [[paymentReportPayments anyObject] valueForKey:@"currency"];
-			}
 			NSDate *date;
 			if (self.sortByMonthPaid) {
 				date = [payment valueForKey:@"paidOrExpectingPaymentDate"];
@@ -129,9 +123,17 @@
 			[monthPayments addObject:payment];
 			paymentsForMonth[date] = monthPayments;
 
-			CGFloat amount = [[payment valueForKey:@"amount"] floatValue];
-			CGFloat currentSum = [sumsByYear[year] floatValue];
-			sumsByYear[year] = @(currentSum + amount);
+			NSString *currencyCode = [payment valueForKey:@"currency"];
+			if (currencyCode) {
+				NSMutableDictionary *sumsForYear = sumsByYear[year];
+				if (!sumsForYear) {
+					sumsForYear = [NSMutableDictionary dictionary];
+					sumsByYear[year] = sumsForYear;
+				}
+				CGFloat amount = [[payment valueForKey:@"amount"] floatValue];
+				CGFloat currentSum = [sumsForYear[currencyCode] floatValue];
+				sumsForYear[currencyCode] = @(currentSum + amount);
+			}
 		}
 	}
 
@@ -144,38 +146,40 @@
 			NSMutableAttributedString *label = [[NSMutableAttributedString alloc] init];
 			for (NSDate *key in keys) {
 				NSArray *monthPayments = payments[key];
-				BOOL isExpected = NO;
-				CGFloat sumForMonth = 0.0f;
+				NSMutableDictionary *sumsByCurrency = [NSMutableDictionary dictionary];
+				NSMutableDictionary *isExpectedByCurrency = [NSMutableDictionary dictionary];
 				for (NSManagedObject *monthPayment in monthPayments) {
-					if (!isExpected && [[monthPayment valueForKey:@"isExpected"] boolValue]) {
-						isExpected = YES;
+					NSString *currencyCode = [monthPayment valueForKey:@"currency"];
+					if (!currencyCode) {
+						continue;
 					}
 					NSNumber *amount = [monthPayment valueForKey:@"amount"];
-					sumForMonth += amount.floatValue;
-				}
-				
-				NSNumber *amount = @(sumForMonth);
-				numberFormatter.currencyCode = paymentCurrencyCode;
-				NSString *nextAmount;
-				if (label.length > 0) {
-					nextAmount = [NSString stringWithFormat:@"\n%@", [numberFormatter stringFromNumber:amount]];
-				} else {
-					nextAmount = [numberFormatter stringFromNumber:amount];
-				}
-
-				NSMutableAttributedString *nextAmountAttributed = [[NSMutableAttributedString alloc] initWithString:nextAmount];
-				UIColor *textColor;
-				if (isExpected) {
-					textColor = [UIColor redColor];
-				} else {
-					if (@available(iOS 13.0, *)) {
-						textColor = [UIColor labelColor];
-					} else {
-						textColor = [UIColor blackColor];
+					CGFloat currentSum = [sumsByCurrency[currencyCode] floatValue];
+					sumsByCurrency[currencyCode] = @(currentSum + amount.floatValue);
+					if ([[monthPayment valueForKey:@"isExpected"] boolValue]) {
+						isExpectedByCurrency[currencyCode] = @YES;
 					}
 				}
-				[nextAmountAttributed addAttribute:NSForegroundColorAttributeName value:textColor range:NSMakeRange(0, nextAmountAttributed.length)];
-				[label appendAttributedString:nextAmountAttributed];
+
+				NSArray *currencyCodes = [sumsByCurrency.allKeys sortedArrayUsingSelector:@selector(compare:)];
+				for (NSString *currencyCode in currencyCodes) {
+					numberFormatter.currencyCode = currencyCode;
+					NSString *formattedAmount = [numberFormatter stringFromNumber:sumsByCurrency[currencyCode]];
+					NSString *nextAmount = label.length > 0 ? [NSString stringWithFormat:@"\n%@", formattedAmount] : formattedAmount;
+					NSMutableAttributedString *nextAmountAttributed = [[NSMutableAttributedString alloc] initWithString:nextAmount];
+					UIColor *textColor;
+					if ([isExpectedByCurrency[currencyCode] boolValue]) {
+						textColor = [UIColor redColor];
+					} else {
+						if (@available(iOS 13.0, *)) {
+							textColor = [UIColor labelColor];
+						} else {
+							textColor = [UIColor blackColor];
+						}
+					}
+					[nextAmountAttributed addAttribute:NSForegroundColorAttributeName value:textColor range:NSMakeRange(0, nextAmountAttributed.length)];
+					[label appendAttributedString:nextAmountAttributed];
+				}
 			}
 			NSMutableDictionary *labelsForYear = labelsByYear[year];
 			if (!labelsForYear) {
@@ -201,10 +205,15 @@
 		yearView.delegate = self;
 		yearView.year = [year integerValue];
 		yearView.labelsByMonth = labelsByYear[year];
-		if ([allPaymentReports count] > 0) {
-			// We assume that all payments have the same currency.
-			numberFormatter.currencyCode = paymentCurrencyCode;
-			yearView.footerText = [NSString stringWithFormat:@"\u2211 %@", [numberFormatter stringFromNumber:sumsByYear[year]]];
+		NSDictionary *sumsForYear = sumsByYear[year];
+		if (sumsForYear.count > 0) {
+			NSMutableArray *formattedSums = [NSMutableArray array];
+			NSArray *currencyCodes = [sumsForYear.allKeys sortedArrayUsingSelector:@selector(compare:)];
+			for (NSString *currencyCode in currencyCodes) {
+				numberFormatter.currencyCode = currencyCode;
+				[formattedSums addObject:[numberFormatter stringFromNumber:sumsForYear[currencyCode]]];
+			}
+			yearView.footerText = [NSString stringWithFormat:@"\u2211 %@", [formattedSums componentsJoinedByString:@"  "]];
 		}
 		yearView.autoresizingMask = UIViewAutoresizingFlexibleHeight;
 		[scrollView addSubview:yearView];
